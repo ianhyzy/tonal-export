@@ -262,6 +262,8 @@ def fetch():
 
 
 def ts(v):
+    # Python 3.10's fromisoformat only takes 3- or 6-digit fractions; Tonal also sends e.g. ".06Z"
+    v = re.sub(r"\.(\d{1,6})(?!\d)", lambda m: "." + m[1].ljust(6, "0"), v)
     return datetime.fromisoformat(v.replace("Z", "+00:00"))
 
 

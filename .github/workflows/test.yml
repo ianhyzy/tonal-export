@@ -1,0 +1,35 @@
+name: test
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+        python: ["3.10", "3.x"]  # the README's minimum and the newest stable release
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -I test_export.py
+      - name: Bad arguments exit non-zero without a traceback
+        run: |
+          python -I - <<'EOF'
+          import subprocess, sys
+          for args in ([], ["no-such-folder"]):
+              r = subprocess.run([sys.executable, "-I", "export_history.py", *args],
+                                 capture_output=True, text=True, stdin=subprocess.DEVNULL)
+              out = r.stdout + r.stderr
+              print(f"$ export_history.py {' '.join(args)} -> exit {r.returncode}\n{out}")
+              assert r.returncode != 0 and "Traceback" not in out, args
+          EOF
