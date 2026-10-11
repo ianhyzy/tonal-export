@@ -55,6 +55,12 @@ assert eh.ts("2026-10-09T22:29:59.5+02:00") == eh.ts("2026-10-09T20:29:59.500Z")
 assert eh.to_local("2026-01-02T03:04:05Z", "No/Such") == eh.ts("2026-01-02T03:04:05Z")
 assert eh.to_local("2026-01-02T03:04:05Z", None).strftime("%H:%M") == "03:04"
 sys.platform = plat
+# rest_before_sec: blank after/for 0001-01-01 placeholder sets, gap since previous end otherwise
+z = "0001-01-01T00:00:00Z"
+sets = [{"movementId": "m", "beginTime": b, "endTime": e} for b, e in
+        ((z, z), (z, z), ("2026-10-09T22:29:59Z", "2026-10-09T22:30:44Z"), ("2026-10-09T22:31:14Z", "2026-10-09T22:32:00Z"))]
+cols, rows = eh.render([{"id": "a", "beginTime": "2026-10-09T22:28:05Z", "workoutSetActivity": sets}], {}, {}, {})["tonal_sets"]
+assert [r[cols.index("rest_before_sec")] for r in rows] == ["", "", "", 30]
 
 # req: retries 503/timeouts, gives up on 404 at once, raises after the last try
 calls = []

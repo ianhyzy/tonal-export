@@ -365,9 +365,10 @@ def render(details, movements, coaches, types):
                                            ("eccentric", "eccentric"), ("chains", "chains"), ("smartFlex", "flex"))
                             if s.get(k))
             r = lambda k, n=1: "" if s.get(k) is None else round(s[k], n)
-            try:
-                rest = round((ts(s["beginTime"]) - prev_end).total_seconds()) if prev_end else ""
-                prev_end = ts(s["endTime"])
+            try:  # some sets carry a 0001-01-01 placeholder for both times: treat it as unknown
+                b, e = ts(s["beginTime"]), ts(s["endTime"])
+                rest = round((b - prev_end).total_seconds()) if prev_end and b.year > 1 else ""
+                prev_end = e if e.year > 1 else None
             except Exception:
                 rest = ""
             sets.append([d["id"], sess[d["id"]], date, title, s.get("blockNumber", ""), s.get("round", ""),
