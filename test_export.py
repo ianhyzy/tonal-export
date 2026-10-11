@@ -48,6 +48,9 @@ with tempfile.TemporaryDirectory() as d:
     assert eh.keychain_get() is None
     eh.keychain_set("rt1"), eh.keychain_set("rt2")
     assert eh.keychain_get() == "rt2" and os.listdir(os.path.dirname(eh.TOKEN_FILE)) == ["refresh_token"]
+# timestamps with 1-3 digit fractions parse on Python 3.10 too
+assert eh.ts("2026-10-09T22:29:59.06Z").microsecond == 60000
+assert eh.ts("2026-10-09T22:29:59.5+02:00") == eh.ts("2026-10-09T20:29:59.500Z")
 # unknown timezone (Windows without tzdata): same instant in this computer's zone; no tz = UTC
 assert eh.to_local("2026-01-02T03:04:05Z", "No/Such") == eh.ts("2026-01-02T03:04:05Z")
 assert eh.to_local("2026-01-02T03:04:05Z", None).strftime("%H:%M") == "03:04"

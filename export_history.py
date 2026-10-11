@@ -17,7 +17,7 @@ Raw activity JSON is cached in ./history/ next to this script, so re-runs only f
 new workouts. Exits non-zero (and posts a macOS notification when unattended) if
 anything couldn't be fetched or written.
 """
-import csv, getpass, io, json, os, subprocess, sys, time, urllib.error, urllib.request
+import csv, getpass, io, json, os, re, subprocess, sys, time, urllib.error, urllib.request
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -259,6 +259,8 @@ def fetch():
 
 
 def ts(v):
+    # Python 3.10's fromisoformat only takes 3- or 6-digit fractions; Tonal also sends e.g. ".06Z"
+    v = re.sub(r"\.(\d{1,6})(?!\d)", lambda m: "." + m[1].ljust(6, "0"), v)
     return datetime.fromisoformat(v.replace("Z", "+00:00"))
 
 
