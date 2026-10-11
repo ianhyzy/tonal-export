@@ -31,7 +31,7 @@ Until it's merged, use the `feat/per-set-activity-detail` branch of [my fork](ht
 ## Requirements
 
 - macOS: the login is saved in the Keychain, and failures post a notification.
-- Windows: the login is saved in a file in `%LOCALAPPDATA%\tonal-export\`, and there are no notifications. Use `py -3` where this README says `python3`. Without the `tzdata` package Python has no timezone database on Windows, so dates and start times use the computer's timezone instead of each workout's.
+- Windows: the login is saved in a file in `%LOCALAPPDATA%\tonal-export\`, and failures show a Windows notification. Use `py -3` where this README says `python3`. Without the `tzdata` package Python has no timezone database on Windows, so dates and start times use the computer's timezone instead of each workout's.
 - Python 3.10 or newer. Standard library only, nothing to install.
 
 ## Usage
@@ -77,7 +77,6 @@ Save this as `~/Library/LaunchAgents/com.example.tonal-export.plist`, replacing 
 	</array>
 	<key>StartCalendarInterval</key>
 	<dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
-	<key>StandardErrorPath</key><string>/path/to/tonal-export/export.log</string>
 </dict>
 </plist>
 ```
@@ -90,22 +89,25 @@ launchctl load ~/Library/LaunchAgents/com.example.tonal-export.plist
 
 #### Windows
 
-Create a Task Scheduler task from PowerShell, replacing the three paths at the top:
+Create a Task Scheduler task from PowerShell, replacing the two paths at the top:
 
 ```powershell
 $script = 'C:\path\to\tonal-export\export_history.py'
 $out = 'C:\path\to\output-folder'
-$log = 'C:\path\to\tonal-export\export.log'
-$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"py -3 -I `"$script`" `"$out`" <NUL >>`"$log`" 2>&1`""
+$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"py -3 -I `"$script`" `"$out`" <NUL`""
 $trigger = New-ScheduledTaskTrigger -Daily -At 3am
 $trigger.StartBoundary = (Get-Date 3am).ToString('s')  # local time, so it stays 3 AM across daylight saving
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable
 Register-ScheduledTask -TaskName tonal-export -Action $action -Trigger $trigger -Settings $settings
 ```
 
-`<NUL` keeps it from waiting at a login prompt, and the log gets the same lines launchd's `StandardErrorPath` does. `-StartWhenAvailable` runs a missed 3 AM start when the computer wakes, like launchd. The task runs only while you're signed in, and a console window flashes when it starts. Run it now with `Start-ScheduledTask tonal-export`, and remove it with `Unregister-ScheduledTask tonal-export`.
+`<NUL` keeps it from waiting at a login prompt. `-StartWhenAvailable` runs a missed 3 AM start when the computer wakes, like launchd. The task runs only while you're signed in, and a console window flashes when it starts. Run it now with `Start-ScheduledTask tonal-export`, and remove it with `Unregister-ScheduledTask tonal-export`.
 
-Network errors and Tonal server errors are retried. A workout that still can't be downloaded is skipped and fetched again on the next run. If the download fails, the CSVs are still rebuilt from the cache; if there's no cache yet either (say, a first run that couldn't sign in), the existing CSVs are left untouched. The script exits non-zero, writes a one-line reason to the log and, when run unattended, posts a macOS notification. Windows has no notification, so there failures only show up in `export.log`.
+Network errors and Tonal server errors are retried. A workout that still can't be downloaded is skipped and fetched again on the next run. If the download fails, the CSVs are still rebuilt from the cache; if there's no cache yet either (say, a first run that couldn't sign in), the existing CSVs are left untouched. The script exits non-zero, writes a one-line reason to the log and, when run unattended, posts a macOS or Windows notification.
+
+### Log
+
+Every run appends what it prints, errors included, to `export.log` next to the script, so a scheduled run needs no log redirect of its own. The log keeps the runs from the last 7 days. To keep more or fewer, change `LOG_DAYS` near the top of the script; `0` keeps everything.
 
 ## Output
 

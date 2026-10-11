@@ -160,4 +160,58 @@ with tempfile.TemporaryDirectory() as d:
     with open(csv_path, encoding="utf-8") as f:
         assert "Arms 💪" in f.read()
     assert len(os.listdir(out)) == 6
+
+# log: runs older than LOG_DAYS are dropped (0 keeps all), then stderr goes to both the
+# terminal and the log; a log that can't be opened or written never stops the run
+now = eh.datetime(2026, 10, 11, 12)
+old, recent = "2026-10-01T03:00:00\nold run\n", "2026-10-08T03:00:00\nrecent run\nTraceback: x\n"
+assert eh.prune_log(old + recent, 7, now) == recent
+assert eh.prune_log(old + recent, 0, now) == old + recent
+assert eh.prune_log(old + recent, 1, now) == ""
+with tempfile.TemporaryDirectory() as d:
+    log = os.path.join(d, "export.log")
+    with open(log, "w", encoding="utf-8") as f:
+        f.write(old + recent)
+    real, term = sys.stderr, io.StringIO()
+    sys.stderr = term
+    try:
+        eh.start_log(log, 7, now)
+        print("this run 💪", file=sys.stderr)
+        sys.stderr.log.close()
+        sys.stderr.write("log closed, terminal still works\n")
+    finally:
+        sys.stderr = real
+    with open(log, encoding="utf-8") as f:
+        assert f.read() == recent + "this run 💪\n"
+    assert term.getvalue() == "this run 💪\nlog closed, terminal still works\n"
+    assert os.listdir(d) == ["export.log"]
+    sys.stderr = term
+    eh.start_log(os.path.join(d, "missing", "export.log"), 7, now)
+    assert sys.stderr is term
+    sys.stderr = real
+
+# notify on Windows: PowerShell toast with the message only in the environment, never argv;
+# a missing powershell.exe is ignored
+plat, run, ran = sys.platform, eh.subprocess.run, []
+sys.platform = "win32"
+eh.subprocess.run = lambda args, **kw: ran.append((args, kw))
+msg = "it's \"quoted\"; $(evil) `x`"
+eh.notify(msg)
+args, kw = ran[0]
+assert args[0] == "powershell.exe" and kw["env"]["TONAL_EXPORT_MESSAGE"] == msg
+script = eh.base64.b64decode(args[-1]).decode("utf-16-le")
+assert all(msg not in a for a in args) and msg not in script and "$env:TONAL_EXPORT_MESSAGE" in script
+
+
+def missing(*a, **kw):
+    raise FileNotFoundError("powershell.exe")
+eh.subprocess.run = missing
+eh.notify(msg)
+sys.platform, eh.subprocess.run = plat, run
+
+# interactive: stdin from NUL / /dev/null is not someone at a terminal (on Windows NUL is a tty)
+r = eh.subprocess.run([sys.executable, "-I", "-c", "import sys; sys.path.insert(0, sys.argv[1]); "
+                       "import export_history; print(export_history.interactive())", os.path.dirname(eh.__file__)],
+                      stdin=eh.subprocess.DEVNULL, capture_output=True, text=True)
+assert r.stdout.strip() == "False", r
 print("ok")
