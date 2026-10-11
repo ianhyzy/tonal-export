@@ -1,5 +1,5 @@
 """Plain-assert checks for export_history: python3 -I test_export.py"""
-import io, os, sys, tempfile, time, urllib.error
+import io, json, os, sys, tempfile, time, urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import export_history as eh  # noqa: E402
@@ -22,6 +22,36 @@ with tempfile.TemporaryDirectory() as d:
     os.environ.update(TONAL_USERNAME="e@v", TONAL_PASSWORD="pw")
     assert eh.mcp_creds(env)[:2] == ("e@v", "pw")
     del os.environ["TONAL_USERNAME"], os.environ["TONAL_PASSWORD"]
+
+# claude_creds: an MCP's env in Claude Code (user, then project scope) or Desktop config;
+# unreadable, malformed and Tonal-less configs are skipped
+with tempfile.TemporaryDirectory() as d:
+    def cfg(name, data):
+        p = os.path.join(d, name)
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(data if isinstance(data, str) else json.dumps(data))
+        return p
+    tonal = {"command": "node", "env": {"TONAL_USERNAME": "c@d", "TONAL_PASSWORD": "pw"}}
+    bad = cfg("bad.json", '{"trunc')
+    odd = cfg("odd.json", {"mcpServers": [], "projects": {"x": None, "y": {"mcpServers": {"s": {"env": "?"}}}}})
+    none = cfg("none.json", {"mcpServers": {"other": {"env": {"TONAL_USERNAME": "only-user"}}}})
+    proj = cfg("proj.json", {"projects": {"C:/p": {"mcpServers": {"tonal": tonal}}}})
+    desk = cfg("desk.json", {"mcpServers": {"tonal": {**tonal, "env": {**tonal["env"], "TONAL_USERNAME": "e@f"}}}})
+    assert eh.claude_creds([os.path.join(d, "missing"), bad, odd, none]) is None
+    assert eh.claude_creds([bad, odd, none, proj, desk]) == ("c@d", "pw", proj)
+    assert eh.claude_creds([desk, proj])[0] == "e@f"
+
+# token file (non-macOS): missing reads as None, rewrites replace it, no .tmp left behind
+plat, sys.platform = sys.platform, "win32"
+with tempfile.TemporaryDirectory() as d:
+    eh.TOKEN_FILE = os.path.join(d, "tonal-export", "refresh_token")
+    assert eh.keychain_get() is None
+    eh.keychain_set("rt1"), eh.keychain_set("rt2")
+    assert eh.keychain_get() == "rt2" and os.listdir(os.path.dirname(eh.TOKEN_FILE)) == ["refresh_token"]
+# unknown timezone (Windows without tzdata): same instant in this computer's zone; no tz = UTC
+assert eh.to_local("2026-01-02T03:04:05Z", "No/Such") == eh.ts("2026-01-02T03:04:05Z")
+assert eh.to_local("2026-01-02T03:04:05Z", None).strftime("%H:%M") == "03:04"
+sys.platform = plat
 
 # req: retries 503/timeouts, gives up on 404 at once, raises after the last try
 calls = []

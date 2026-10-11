@@ -20,6 +20,7 @@ Until it's merged, use the `feat/per-set-activity-detail` branch of [my fork](ht
 ## Requirements
 
 - macOS: the login is saved in the Keychain, and failures post a notification.
+- Windows: the login is saved in a file in `%LOCALAPPDATA%\tonal-export\`, and there are no notifications. Use `py -3` where this README says `python3`. Without the `tzdata` package Python has no timezone database on Windows, so dates and start times use the computer's timezone instead of each workout's.
 - Python 3.10 or newer. Standard library only, nothing to install.
 
 ## Usage
@@ -34,8 +35,8 @@ The first run downloads everything. Later runs fetch only new workouts (raw JSON
 
 The script tries these in order:
 
-1. A saved refresh token in the macOS Keychain (service `tonal-export`).
-2. The MCP's credentials: the `TONAL_USERNAME` / `TONAL_PASSWORD` environment variables, or the MCP's `.env` file. The path is set in `MCP_ENV` near the top of the script; change it if your MCP lives somewhere other than `~/Documents/ts-tonal-mcp`.
+1. A saved refresh token in the macOS Keychain (service `tonal-export`), or on Windows in `%LOCALAPPDATA%\tonal-export\refresh_token`.
+2. The MCP's credentials: the `TONAL_USERNAME` / `TONAL_PASSWORD` environment variables, the MCP's `.env` file, or the `env` you gave the MCP in Claude's config (`claude mcp add … -e`, which ends up in `~/.claude.json`, or Claude Desktop's `claude_desktop_config.json`). The `.env` path is set in `MCP_ENV` near the top of the script; change it if your MCP lives somewhere other than `~/Documents/ts-tonal-mcp`.
 3. An email and password prompt, only when run in a terminal.
 
 After a successful sign-in, the refresh token is saved to the Keychain and your password is never stored. To sign out:
@@ -43,6 +44,8 @@ After a successful sign-in, the refresh token is saved to the Keychain and your 
 ```bash
 security delete-generic-password -s tonal-export
 ```
+
+On Windows, delete `%LOCALAPPDATA%\tonal-export\refresh_token` instead.
 
 ### Running it nightly
 
@@ -73,6 +76,16 @@ Then load it:
 ```bash
 launchctl load ~/Library/LaunchAgents/com.example.tonal-export.plist
 ```
+
+#### Windows
+
+Create a Task Scheduler task from PowerShell, replacing the two folder paths:
+
+```powershell
+schtasks /Create /TN tonal-export /SC DAILY /ST 03:00 /TR 'cmd /c py -3 -I C:\path\to\tonal-export\export_history.py C:\path\to\output-folder <NUL >>C:\path\to\tonal-export\export.log 2>&1'
+```
+
+`<NUL` keeps it from waiting at a login prompt, and the log gets the same lines launchd's `StandardErrorPath` does. The task runs only while you're signed in, and a console window flashes when it starts. Unlike launchd, Task Scheduler doesn't run a missed 3 AM start when the computer wakes; to get that, open the task in Task Scheduler and tick *Run task as soon as possible after a scheduled start is missed* on the Settings tab. Remove it with `schtasks /Delete /TN tonal-export`.
 
 Network errors and Tonal server errors are retried. A workout that still can't be downloaded is skipped and fetched again on the next run. If the download fails, the CSVs are still rebuilt from the cache. The script exits non-zero, writes a one-line reason to the log and, when run unattended, posts a macOS notification.
 
