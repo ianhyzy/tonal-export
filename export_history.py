@@ -8,18 +8,19 @@ in lb; weight_lb is the set (base) weight, eccentric_lb/chains_lb are added load
 Power, velocity, ROM and 0-1 struggling/inconsistency scores are Tonal's raw
 values. rest_before_sec = gap since previous set ended; set HR comes from the
 workout's HR series during the set. modifiers/prs are ';'-separated.
-On first run, signs in with TONAL_USERNAME/TONAL_PASSWORD from the environment or the
-Tonal MCP's ~/Documents/ts-tonal-mcp/.env, else prompts (same Auth0 login the roni app
-uses); the Auth0 refresh token is then kept in the macOS login keychain (service
+On first run, signs in with TONAL_USERNAME/TONAL_PASSWORD from the environment, the
+Tonal MCP's ~/Documents/ts-tonal-mcp/.env or its env in Claude's config, else prompts
+(same Auth0 login the roni app uses); the Auth0 refresh token is then kept in the macOS login keychain (service
 "tonal-export") so later runs don't ask. Delete it with:
   security delete-generic-password -s tonal-export
 Raw activity JSON is cached in ./history/ next to this script, so re-runs only fetch
-new workouts. Exits non-zero (and posts a macOS notification when unattended) if
+new workouts. Each run's output is also appended to ./export.log, which keeps LOG_DAYS
+days. Exits non-zero (and, when unattended, posts a macOS or Windows notification) if
 anything couldn't be fetched or written.
 """
-import csv, getpass, io, json, os, subprocess, sys, time, urllib.error, urllib.request
-from datetime import datetime
-from zoneinfo import ZoneInfo
+import base64, csv, getpass, io, json, os, re, subprocess, sys, time, urllib.error, urllib.request
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # -I drops the script dir
 import export_custom  # noqa: E402
@@ -29,6 +30,12 @@ CACHE = os.path.join(HERE, "history")
 API = "https://api.tonal.com"
 CLIENT_ID = "ERCyexW-xoVG_Yy3RDe-eV4xsOnRHP6L"  # Tonal's public Auth0 client id (from roni)
 MCP_ENV = os.path.expanduser("~/Documents/ts-tonal-mcp/.env")
+LOG_DAYS = 7  # export.log next to this script keeps the runs from the last LOG_DAYS days; 0 keeps everything
+LOG = os.path.join(HERE, "export.log")
+# where `claude mcp add` (Claude Code) and Claude Desktop keep each MCP server's env
+CLAUDE_CONFIGS = [os.path.expanduser("~/.claude.json"),
+                  os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~/Library/Application Support"),
+                               "Claude", "claude_desktop_config.json")]
 NET_ERRORS = (urllib.error.URLError, TimeoutError, ConnectionError)  # URLError includes HTTPError
 
 
@@ -55,14 +62,29 @@ def req(url, token=None, body=None, headers=None, tries=4):
 
 
 KEYCHAIN = ["-s", "tonal-export", "-a", "refresh_token"]
+# not macOS: no keychain, so a file only this user can read (%LOCALAPPDATA% is per-user on Windows)
+TOKEN_FILE = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/.local/share"),
+                          "tonal-export", "refresh_token")
 
 
 def keychain_get():
+    if sys.platform != "darwin":
+        try:
+            with open(TOKEN_FILE, encoding="utf-8") as f:
+                return f.read().strip() or None
+        except OSError:
+            return None
     r = subprocess.run(["security", "find-generic-password", *KEYCHAIN, "-w"], capture_output=True, text=True)
     return r.stdout.strip() or None
 
 
 def keychain_set(token):
+    if sys.platform != "darwin":
+        os.makedirs(os.path.dirname(TOKEN_FILE), mode=0o700, exist_ok=True)
+        with os.fdopen(os.open(TOKEN_FILE + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
+            f.write(token)
+        os.replace(TOKEN_FILE + ".tmp", TOKEN_FILE)
+        return
     # via `security -i` stdin so the token never appears in a process argv
     cmd = f'add-generic-password -U {" ".join(KEYCHAIN)} -w "{token}"\n'
     subprocess.run(["security", "-i"], input=cmd, capture_output=True, text=True, check=True)
@@ -75,17 +97,36 @@ def mcp_creds(path=MCP_ENV):
         return u, p, "TONAL_USERNAME/TONAL_PASSWORD env vars"
     env = {}
     try:
-        for line in open(path):
+        for line in open(path, encoding="utf-8"):
             k, sep, v = line.strip().partition("=")
             v = v.strip()
             if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
                 v = v[1:-1]
             if sep:
                 env[k.strip()] = v
-    except OSError:
+    except (OSError, ValueError):  # ValueError: not UTF-8
         return None
     if env.get("TONAL_USERNAME") and env.get("TONAL_PASSWORD"):
         return env["TONAL_USERNAME"], env["TONAL_PASSWORD"], path
+    return None
+
+
+def claude_creds(paths=CLAUDE_CONFIGS):
+    """(email, password, source) from the env of an MCP server in Claude's config that has both
+    TONAL_ keys: user-scope servers, then per-project ones, then Claude Desktop. None if none."""
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as f:
+                cfg = json.load(f)
+        except (OSError, ValueError):
+            continue
+        d = lambda o, k: o.get(k) if isinstance(o, dict) and isinstance(o.get(k), dict) else {}
+        groups = [d(cfg, "mcpServers"), *[d(p, "mcpServers") for p in d(cfg, "projects").values()]]
+        for servers in groups:
+            for s in servers.values():
+                env = d(s, "env")
+                if env.get("TONAL_USERNAME") and env.get("TONAL_PASSWORD"):
+                    return env["TONAL_USERNAME"], env["TONAL_PASSWORD"], path
     return None
 
 
@@ -97,7 +138,7 @@ def auth(body):
 
 
 def login():
-    """Keychain refresh token, else the MCP's credentials, else prompt (terminal only)."""
+    """Keychain refresh token, else the MCP's credentials (env, .env, Claude config), else prompt (terminal only)."""
     rt = keychain_get()
     if rt:
         try:
@@ -106,14 +147,19 @@ def login():
             if e.code not in (400, 401, 403):
                 raise  # transient: already retried by req(); keep the keychain token
             print("saved Tonal login expired, signing in again", file=sys.stderr)
-    creds = mcp_creds()
+    creds = mcp_creds() or claude_creds()
+    not_signed_in = Fatal("not signed in to Tonal: no TONAL_USERNAME/TONAL_PASSWORD in the environment, "
+                          f"{MCP_ENV} or the Tonal MCP's Claude config; run export_history.py once in a terminal")
     if creds:
         email, pw, src = creds
-    elif sys.stdin.isatty():
-        email, pw, src = input("Tonal email: "), getpass.getpass("Tonal password: "), "the prompt"
+    elif interactive():
+        try:
+            email, pw, src = input("Tonal email: "), getpass.getpass("Tonal password: "), "the prompt"
+        except EOFError:  # stdin closed after all
+            print(flush=True)  # end the unanswered prompt line
+            raise not_signed_in
     else:
-        raise Fatal(f"not signed in to Tonal: add TONAL_USERNAME/TONAL_PASSWORD to {MCP_ENV} "
-                    "or run export_history.py once in a terminal")
+        raise not_signed_in
     try:
         return auth({"grant_type": "http://auth0.com/oauth/grant-type/password-realm",
                      "username": email, "password": pw, "realm": "Username-Password-Authentication",
@@ -143,7 +189,7 @@ def api(path, headers=None):
 
 def write(path, text):
     """Atomic: a crash never leaves a truncated file."""
-    with open(path + ".tmp", "w", newline="") as f:
+    with open(path + ".tmp", "w", encoding="utf-8", newline="") as f:
         f.write(text)
     os.replace(path + ".tmp", path)
 
@@ -151,7 +197,7 @@ def write(path, text):
 def read_json(path):
     """Parsed JSON, or None if the file is missing or corrupt."""
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except (OSError, ValueError):
         return None
@@ -219,9 +265,21 @@ def ts(v):
     return datetime.fromisoformat(v.replace("Z", "+00:00"))
 
 
+def to_local(v, tz):
+    """v in the workout's timezone. Off macOS, an unknown zone (Windows has no tz database
+    without the tzdata package) falls back to this computer's timezone."""
+    try:
+        zone = ZoneInfo(tz) if tz else timezone.utc
+    except ZoneInfoNotFoundError:
+        if sys.platform == "darwin":
+            raise
+        zone = None
+    return ts(v).astimezone(zone)
+
+
 def local_date(v, tz):
     try:
-        return ts(v).astimezone(ZoneInfo(tz or "UTC")).date().isoformat()
+        return to_local(v, tz).date().isoformat()
     except Exception:
         return v[:10]
 
@@ -278,7 +336,7 @@ def render(details, movements, coaches, types):
         tz = d.get("timezone")
         date = local_date(d.get("beginTime", ""), tz)
         try:
-            start = ts(d["beginTime"]).astimezone(ZoneInfo(tz or "UTC")).strftime("%H:%M")
+            start = to_local(d["beginTime"], tz).strftime("%H:%M")
         except Exception:
             start = ""
         title = c.get("workoutTitle", "")
@@ -359,9 +417,110 @@ def strength_table(entries):
     return cols, rows
 
 
+def interactive():
+    """True only when someone is at a terminal. On Windows stdin from NUL is a character
+    device, so isatty() is true for it too; only a real console has a console mode."""
+    if not (sys.stdin and sys.stdin.isatty()):
+        return False
+    if sys.platform != "win32":
+        return True
+    import ctypes, msvcrt  # Windows-only modules
+    try:
+        handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+        return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(ctypes.c_ulong())))
+    except OSError:
+        return False
+
+
+# a toast from Windows PowerShell 5.1, which ships with Windows, under its own app id; the
+# message comes from an environment variable so nothing in it is ever parsed as code
+TOAST_PS = r"""
+$m = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+$xml = $m::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
+$text = $xml.GetElementsByTagName('text')
+$text.Item(0).AppendChild($xml.CreateTextNode('Tonal export failed')) > $null
+$text.Item(1).AppendChild($xml.CreateTextNode($env:TONAL_EXPORT_MESSAGE)) > $null
+$app = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+$m::CreateToastNotifier($app).Show([Windows.UI.Notifications.ToastNotification]::new($xml))
+"""
+
+
 def notify(msg):
-    subprocess.run(["osascript", "-e", f'display notification {json.dumps(msg)} with title "Tonal export failed"'],
-                   capture_output=True)
+    """Best effort: a notification that can't be shown is ignored (the log has the message)."""
+    try:
+        if sys.platform == "darwin":
+            subprocess.run(["osascript", "-e", f'display notification {json.dumps(msg)} with title "Tonal export failed"'],
+                           capture_output=True)
+        elif sys.platform == "win32":
+            subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand",
+                            base64.b64encode(TOAST_PS.encode("utf-16-le")).decode()],
+                           env={**os.environ, "TONAL_EXPORT_MESSAGE": msg}, capture_output=True, timeout=60,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+RUN_START = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d$", re.M)  # the timestamp line each run begins with
+
+
+def prune_log(text, days, now):
+    """The log from the first run that started within `days` days of now; 0 keeps it all."""
+    if not days:
+        return text
+    for m in RUN_START.finditer(text):
+        if datetime.fromisoformat(m.group()) >= now - timedelta(days=days):
+            return text[m.start():]
+    return ""
+
+
+class Tee:
+    """stderr that is also appended to a log file. A failing log is dropped, never the export."""
+
+    def __init__(self, stream, log):
+        self.stream, self.log = stream, log
+
+    def write(self, s):
+        if self.log:
+            try:
+                self.log.write(s)
+            except (OSError, ValueError):
+                self.log = None
+        return self.stream.write(s)
+
+    def flush(self):
+        if self.log:
+            try:
+                self.log.flush()
+            except (OSError, ValueError):
+                self.log = None
+        self.stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+def start_log(path=LOG, days=LOG_DAYS, now=None):
+    """Drop runs older than `days` from the log, then copy everything sent to stderr into it
+    (tracebacks too). The script owns the log: Windows can't rewrite a file cmd's >> holds open."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            old = f.read()
+        kept = prune_log(old, days, now or datetime.now())
+        if kept != old:
+            write(path, kept)
+    except OSError:
+        pass  # no log yet, or it can't be rewritten: keep appending to it
+    try:
+        log = open(path, "a", encoding="utf-8", errors="replace", buffering=1)
+    except OSError:
+        return
+    sys.stderr = Tee(sys.stderr, log)
+
+
+def utf8_stderr():
+    """Windows: a redirected stderr (Task Scheduler's log) defaults to cp1252, which can't print
+    every workout title; UTF-8 like macOS, and replace anything unprintable instead of crashing."""
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 
 def main(argv):
@@ -371,14 +530,14 @@ def main(argv):
     out = argv[1]
     if not os.path.isdir(out):
         return [f"output folder not found: {out} (is Google Drive running?)"]
-    problems, fetched, skipped = [], 0, []
+    problems, fetched, skipped, failed = [], 0, [], None
     if "--render" not in argv:
         try:
             fetched, skipped = fetch()
         except Fatal as e:
-            problems.append(f"{e}; CSVs rebuilt from cache")
+            failed = (str(e), "CSVs rebuilt from cache")
         except NET_ERRORS as e:
-            problems.append(f"Tonal download failed ({e}); CSVs rebuilt from cache, data may be stale")
+            failed = (f"Tonal download failed ({e})", "CSVs rebuilt from cache, data may be stale")
         if skipped:
             problems.append(f"skipped {len(skipped)} activities after retries: {' '.join(skipped)}")
     movements = {m["id"]: m for m in load("movements")}
@@ -391,6 +550,13 @@ def main(argv):
                 problems.append(f"corrupt history/{f} left out of the CSVs (next fetch replaces it)")
             else:
                 details.append(d)
+    # nothing downloaded and nothing cached (e.g. a first run that couldn't sign in): writing
+    # empty CSVs would wipe the last good export, which may be in a folder shared with other computers
+    if not details and (failed or "--render" in argv):
+        why = failed[0] if failed else "no workouts cached (run without --render)"
+        return [f"{why}; CSVs in {out} left untouched", *problems]
+    if failed:
+        problems.insert(0, "; ".join(failed))
     types = {t["id"]: t["name"] for t in load("training_types")}
     tables = render(details, {k: m["name"] for k, m in movements.items()}, coaches, types)
     tables["tonal_strength_scores"] = strength_table(load("strength_history"))
@@ -409,11 +575,13 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    utf8_stderr()
+    start_log()
     print(datetime.now().isoformat(timespec="seconds"), file=sys.stderr)
     problems = main(sys.argv)
     for p in problems:
         print(p, file=sys.stderr)
     if problems:
-        if not sys.stdin.isatty():
+        if not interactive():
             notify(problems[0])
         sys.exit(1)
