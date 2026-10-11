@@ -1,0 +1,8 @@
+# personal data and local state
+history/
+*.json
+*.tmp
+export.log
+HANDOFF.md
+__pycache__/
+.DS_Store
