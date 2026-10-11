@@ -4,6 +4,17 @@ Downloads your full Tonal workout history from Tonal's (unofficial) API and writ
 
 It's the historical half of a setup where Claude plans workouts with the [Tonal MCP server](https://github.com/dlwiest/ts-tonal-mcp). The MCP handles recent workouts and building custom workouts on the device. This script gives the model your full history in one pass. It signs in with the same Tonal login as the MCP, so if the MCP is already set up, you won't need to enter anything.
 
+## Quick start
+
+1. Install the [Tonal MCP server](https://github.com/dlwiest/ts-tonal-mcp) as its README describes, giving it your Tonal login with `claude mcp add … -e TONAL_USERNAME=you@example.com -e TONAL_PASSWORD=…`. This script reads the same login.
+2. Run the export once in a terminal, so you can see that it signs in and where the files go (on Windows, `py -3` instead of `python3`):
+
+   ```bash
+   python3 -I export_history.py ~/path/to/output-folder
+   ```
+
+3. Optionally, [run it nightly](#running-it-nightly).
+
 ## Per-set detail in the MCP
 
 My pull request, [dlwiest/ts-tonal-mcp#11](https://github.com/dlwiest/ts-tonal-mcp/pull/11), adds more per-set detail to the MCP's `get_workout_activity_details` tool. Tonal's API already returns these fields, but the MCP didn't show them:
@@ -79,15 +90,22 @@ launchctl load ~/Library/LaunchAgents/com.example.tonal-export.plist
 
 #### Windows
 
-Create a Task Scheduler task from PowerShell, replacing the two folder paths:
+Create a Task Scheduler task from PowerShell, replacing the three paths at the top:
 
 ```powershell
-schtasks /Create /TN tonal-export /SC DAILY /ST 03:00 /TR 'cmd /c py -3 -I C:\path\to\tonal-export\export_history.py C:\path\to\output-folder <NUL >>C:\path\to\tonal-export\export.log 2>&1'
+$script = 'C:\path\to\tonal-export\export_history.py'
+$out = 'C:\path\to\output-folder'
+$log = 'C:\path\to\tonal-export\export.log'
+$action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument "/c `"py -3 -I `"$script`" `"$out`" <NUL >>`"$log`" 2>&1`""
+$trigger = New-ScheduledTaskTrigger -Daily -At 3am
+$trigger.StartBoundary = (Get-Date 3am).ToString('s')  # local time, so it stays 3 AM across daylight saving
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable
+Register-ScheduledTask -TaskName tonal-export -Action $action -Trigger $trigger -Settings $settings
 ```
 
-`<NUL` keeps it from waiting at a login prompt, and the log gets the same lines launchd's `StandardErrorPath` does. The task runs only while you're signed in, and a console window flashes when it starts. Unlike launchd, Task Scheduler doesn't run a missed 3 AM start when the computer wakes; to get that, open the task in Task Scheduler and tick *Run task as soon as possible after a scheduled start is missed* on the Settings tab. Remove it with `schtasks /Delete /TN tonal-export`.
+`<NUL` keeps it from waiting at a login prompt, and the log gets the same lines launchd's `StandardErrorPath` does. `-StartWhenAvailable` runs a missed 3 AM start when the computer wakes, like launchd. The task runs only while you're signed in, and a console window flashes when it starts. Run it now with `Start-ScheduledTask tonal-export`, and remove it with `Unregister-ScheduledTask tonal-export`.
 
-Network errors and Tonal server errors are retried. A workout that still can't be downloaded is skipped and fetched again on the next run. If the download fails, the CSVs are still rebuilt from the cache. The script exits non-zero, writes a one-line reason to the log and, when run unattended, posts a macOS notification.
+Network errors and Tonal server errors are retried. A workout that still can't be downloaded is skipped and fetched again on the next run. If the download fails, the CSVs are still rebuilt from the cache; if there's no cache yet either (say, a first run that couldn't sign in), the existing CSVs are left untouched. The script exits non-zero, writes a one-line reason to the log and, when run unattended, posts a macOS notification. Windows has no notification, so there failures only show up in `export.log`.
 
 ## Output
 

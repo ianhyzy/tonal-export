@@ -108,4 +108,56 @@ with tempfile.TemporaryDirectory() as d:
 # main: missing arg / folder give one line, not a traceback
 assert eh.main(["x"])[0].startswith("usage:")
 assert "not found" in eh.main(["x", "/nonexistent/dir"])[0]
+
+# UTF-8 everywhere, whatever the locale (Windows defaults to cp1252): files, .env, and a
+# redirected stderr printing a workout title it can't encode
+with tempfile.TemporaryDirectory() as d:
+    p = os.path.join(d, "t.json")
+    eh.write(p, '{"t": "Arms 💪"}')
+    with open(p, "rb") as f:
+        assert f.read() == '{"t": "Arms 💪"}'.encode("utf-8")
+    assert eh.read_json(p) == {"t": "Arms 💪"}
+    env = os.path.join(d, ".env")
+    with open(env, "w", encoding="utf-8") as f:
+        f.write("TONAL_USERNAME=é@b.c\nTONAL_PASSWORD=pä💪\n")
+    assert eh.mcp_creds(env)[:2] == ("é@b.c", "pä💪")
+    with open(env, "wb") as f:
+        f.write(b"TONAL_USERNAME=a\nTONAL_PASSWORD=\xe9\xff\n")  # not UTF-8: skipped, not a crash
+    assert eh.mcp_creds(env) is None
+    real, buf = sys.stderr, io.BytesIO()
+    sys.stderr = io.TextIOWrapper(buf, encoding="cp1252")
+    try:
+        eh.utf8_stderr()
+        print("Arms 💪", file=sys.stderr)
+        sys.stderr.flush()
+        logged = buf.getvalue()
+    finally:
+        sys.stderr = real
+    assert logged.decode("utf-8").strip() == "Arms 💪"
+
+# main: a failed download with an empty cache leaves existing CSVs alone; with a cache it
+# rebuilds them (as UTF-8)
+with tempfile.TemporaryDirectory() as d:
+    out, eh.HERE, eh.CACHE = os.path.join(d, "out"), d, os.path.join(d, "history")
+    os.makedirs(out), os.makedirs(eh.CACHE)
+    csv_path = os.path.join(out, "tonal_workouts.csv")
+    with open(csv_path, "w", encoding="utf-8") as f:
+        f.write("last good export")
+
+    def no_login():
+        raise eh.Fatal("not signed in")
+    eh.fetch = no_login
+    probs = eh.main(["x", out])
+    assert probs == [f"not signed in; CSVs in {out} left untouched"], probs
+    assert eh.main(["x", out, "--render"])[0].endswith("left untouched")
+    assert os.listdir(out) == ["tonal_workouts.csv"]
+    with open(csv_path, encoding="utf-8") as f:
+        assert f.read() == "last good export"
+    eh.write(os.path.join(eh.CACHE, "a.json"), json.dumps(
+        {"id": "a", "beginTime": "2026-01-02T03:04:05Z", "endTime": "2026-01-02T04:00:00Z",
+         "contentCard": {"workoutTitle": "Arms 💪"}}))
+    assert eh.main(["x", out]) == ["not signed in; CSVs rebuilt from cache"]
+    with open(csv_path, encoding="utf-8") as f:
+        assert "Arms 💪" in f.read()
+    assert len(os.listdir(out)) == 6
 print("ok")

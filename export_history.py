@@ -67,7 +67,7 @@ TOKEN_FILE = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("
 def keychain_get():
     if sys.platform != "darwin":
         try:
-            with open(TOKEN_FILE) as f:
+            with open(TOKEN_FILE, encoding="utf-8") as f:
                 return f.read().strip() or None
         except OSError:
             return None
@@ -78,7 +78,7 @@ def keychain_get():
 def keychain_set(token):
     if sys.platform != "darwin":
         os.makedirs(os.path.dirname(TOKEN_FILE), mode=0o700, exist_ok=True)
-        with os.fdopen(os.open(TOKEN_FILE + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+        with os.fdopen(os.open(TOKEN_FILE + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
             f.write(token)
         os.replace(TOKEN_FILE + ".tmp", TOKEN_FILE)
         return
@@ -94,14 +94,14 @@ def mcp_creds(path=MCP_ENV):
         return u, p, "TONAL_USERNAME/TONAL_PASSWORD env vars"
     env = {}
     try:
-        for line in open(path):
+        for line in open(path, encoding="utf-8"):
             k, sep, v = line.strip().partition("=")
             v = v.strip()
             if len(v) >= 2 and v[0] == v[-1] and v[0] in "'\"":
                 v = v[1:-1]
             if sep:
                 env[k.strip()] = v
-    except OSError:
+    except (OSError, ValueError):  # ValueError: not UTF-8
         return None
     if env.get("TONAL_USERNAME") and env.get("TONAL_PASSWORD"):
         return env["TONAL_USERNAME"], env["TONAL_PASSWORD"], path
@@ -186,7 +186,7 @@ def api(path, headers=None):
 
 def write(path, text):
     """Atomic: a crash never leaves a truncated file."""
-    with open(path + ".tmp", "w", newline="") as f:
+    with open(path + ".tmp", "w", encoding="utf-8", newline="") as f:
         f.write(text)
     os.replace(path + ".tmp", path)
 
@@ -194,7 +194,7 @@ def write(path, text):
 def read_json(path):
     """Parsed JSON, or None if the file is missing or corrupt."""
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except (OSError, ValueError):
         return None
@@ -421,6 +421,12 @@ def notify(msg):
                    capture_output=True)
 
 
+def utf8_stderr():
+    """Windows: a redirected stderr (Task Scheduler's log) defaults to cp1252, which can't print
+    every workout title; UTF-8 like macOS, and replace anything unprintable instead of crashing."""
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv):
     """Returns the list of problems; empty means everything was fetched and written."""
     if len(argv) < 2 or argv[1].startswith("-"):
@@ -428,14 +434,14 @@ def main(argv):
     out = argv[1]
     if not os.path.isdir(out):
         return [f"output folder not found: {out} (is Google Drive running?)"]
-    problems, fetched, skipped = [], 0, []
+    problems, fetched, skipped, failed = [], 0, [], None
     if "--render" not in argv:
         try:
             fetched, skipped = fetch()
         except Fatal as e:
-            problems.append(f"{e}; CSVs rebuilt from cache")
+            failed = (str(e), "CSVs rebuilt from cache")
         except NET_ERRORS as e:
-            problems.append(f"Tonal download failed ({e}); CSVs rebuilt from cache, data may be stale")
+            failed = (f"Tonal download failed ({e})", "CSVs rebuilt from cache, data may be stale")
         if skipped:
             problems.append(f"skipped {len(skipped)} activities after retries: {' '.join(skipped)}")
     movements = {m["id"]: m for m in load("movements")}
@@ -448,6 +454,13 @@ def main(argv):
                 problems.append(f"corrupt history/{f} left out of the CSVs (next fetch replaces it)")
             else:
                 details.append(d)
+    # nothing downloaded and nothing cached (e.g. a first run that couldn't sign in): writing
+    # empty CSVs would wipe the last good export, which may be in a folder shared with other computers
+    if not details and (failed or "--render" in argv):
+        why = failed[0] if failed else "no workouts cached (run without --render)"
+        return [f"{why}; CSVs in {out} left untouched", *problems]
+    if failed:
+        problems.insert(0, "; ".join(failed))
     types = {t["id"]: t["name"] for t in load("training_types")}
     tables = render(details, {k: m["name"] for k, m in movements.items()}, coaches, types)
     tables["tonal_strength_scores"] = strength_table(load("strength_history"))
@@ -466,6 +479,7 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    utf8_stderr()
     print(datetime.now().isoformat(timespec="seconds"), file=sys.stderr)
     problems = main(sys.argv)
     for p in problems:
