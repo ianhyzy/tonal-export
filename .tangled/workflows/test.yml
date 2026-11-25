@@ -1,0 +1,27 @@
+# CI on Tangled, run by the spindle at spindle.ian.gay: Linux with the current Python 3.
+# The GitHub mirror still runs .github/workflows/test.yml, which adds macOS, Windows and Python 3.10.
+when:
+  - event: [push, manual]
+    branch: main
+  - event: pull_request
+    branch: main
+
+engine: nixery
+dependencies:
+  nixpkgs:
+    - python3
+
+steps:
+  - name: test
+    command: python3 -I test_export.py
+  - name: bad arguments exit non-zero without a traceback
+    command: |
+      python3 -I - <<'EOF'
+      import subprocess, sys
+      for args in ([], ["no-such-folder"]):
+          r = subprocess.run([sys.executable, "-I", "export_history.py", *args],
+                             capture_output=True, text=True, stdin=subprocess.DEVNULL)
+          out = r.stdout + r.stderr
+          print(f"$ export_history.py {' '.join(args)} -> exit {r.returncode}\n{out}")
+          assert r.returncode != 0 and "Traceback" not in out, args
+      EOF
